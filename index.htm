@@ -1,0 +1,680 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Block Attack Game</title>
+    <style>
+        body {
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            margin: 0;
+            background: linear-gradient(to bottom, #006400, #000000);
+            font-family: Arial, sans-serif;
+        }
+        #gameContainer {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            text-align: center;
+        }
+        #topBar {
+            display: flex;
+            justify-content: space-around;
+            align-items: center;
+            padding: 10px;
+            box-sizing: border-box;
+            color: #fff;
+        }
+        #score {
+            font-size: 24px;
+        }
+        button {
+            background: none;
+            border: none;
+            cursor: pointer;
+            padding: 0;
+        }
+        svg {
+            width: 24px;
+            height: 24px;
+            fill: #fff;
+        }
+        #gameCanvas {
+            margin-top: 5px;
+        }
+    </style>
+</head>
+<body>
+    <div id="gameContainer">
+        <div id="topBar">
+            <div id="score">Score: 0</div>
+            <button id="pauseBtn"></button>
+            <button id="newGameBtn">
+                <svg viewBox="0 0 24 24">
+                    <path d="M17.65 6.35A7.958 7.958 0 0012 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08A5.99 5.99 0 0112 18c-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/>
+                </svg>
+            </button>
+        </div>
+        <canvas id="gameCanvas"></canvas>
+    </div>
+    <script>
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        const BASE_ROWS = 8;
+        const BASE_COLS = 15;
+        const COLORS = ['#FF4136', '#2ECC40', '#0074D9', '#FFDC00', '#B10DC9', '#39CCCC', '#FF851B'];
+        const BG_COLOR_START = '#006400';
+        const BG_COLOR_END = '#000000';
+
+        let grid = [];
+        let score = 0;
+        let numColors = 3;
+        let offset = 0;
+        let speed = 0.5;
+        let paused = false;
+        let gameRunning = false;
+        let shiftCount = 0;
+        let bombChance = 0.02;
+        let direction = 'horizontal';
+        let rows, cols, blockSize;
+        let destroyingBlocks = [];
+        let fallingBlocks = [];
+        let shiftingBlocks = [];
+        let phase = 'normal';
+
+        let animationLoop;
+
+        const pauseBtn = document.getElementById('pauseBtn');
+        const newGameBtn = document.getElementById('newGameBtn');
+        pauseBtn.addEventListener('click', togglePause);
+        newGameBtn.addEventListener('click', initGame);
+
+        const pauseSVG = '<svg viewBox="0 0 24 24"><path d="M6 4h4v16H6zM14 4h4v16h-4z"/></svg>';
+        const playSVG = '<svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>';
+
+        function togglePause() {
+            paused = !paused;
+            pauseBtn.innerHTML = paused ? playSVG : pauseSVG;
+            if (!paused && gameRunning) {
+                animationLoop = requestAnimationFrame(update);
+            }
+        }
+
+        function determineOrientationAndSize() {
+            const topBar = document.getElementById('topBar');
+            const topBarHeight = topBar.offsetHeight;
+            const winWidth = window.innerWidth;
+            const winHeight = window.innerHeight - topBarHeight - 5;
+            if (winWidth >= winHeight) {
+                direction = 'horizontal';
+                cols = BASE_COLS;
+                rows = BASE_ROWS;
+            } else {
+                direction = 'vertical';
+                cols = BASE_ROWS;
+                rows = BASE_COLS;
+            }
+            blockSize = Math.min(winWidth / cols, winHeight / rows);
+            canvas.width = cols * blockSize;
+            canvas.height = rows * blockSize;
+            topBar.style.width = `${canvas.width}px`;
+        }
+
+        function initGame() {
+            determineOrientationAndSize();
+            grid = Array.from({length: rows}, () => Array(cols).fill(-1));
+            score = 0;
+            numColors = 3;
+            offset = 0;
+            speed = 0.5;
+            shiftCount = 0;
+            gameRunning = true;
+            paused = false;
+            destroyingBlocks = [];
+            fallingBlocks = [];
+            shiftingBlocks = [];
+            phase = 'normal';
+            pauseBtn.innerHTML = pauseSVG;
+            updateScore();
+            addInitial();
+            if (animationLoop) cancelAnimationFrame(animationLoop);
+            animationLoop = requestAnimationFrame(update);
+        }
+
+        function addInitial() {
+            const initialCount = 5;
+            for (let i = 0; i < initialCount; i++) {
+                if (direction === 'horizontal') {
+                    addNewLeftColumn();
+                    shiftRight();
+                } else {
+                    addNewTopRow();
+                    shiftDown();
+                }
+            }
+        }
+
+        function updateScore() {
+            document.getElementById('score').textContent = `Score: ${score}`;
+        }
+
+        function drawRoundedRect(x, y, w, h, r) {
+            ctx.beginPath();
+            ctx.moveTo(x + r, y);
+            ctx.arcTo(x + w, y, x + w, y + h, r);
+            ctx.arcTo(x + w, y + h, x, y + h, r);
+            ctx.arcTo(x, y + h, x, y, r);
+            ctx.arcTo(x, y, x + w, y, r);
+            ctx.closePath();
+        }
+
+        function drawGrid() {
+            const gradient = ctx.createLinearGradient(0, 0, 0, canvas.height);
+            gradient.addColorStop(0, BG_COLOR_START);
+            gradient.addColorStop(1, BG_COLOR_END);
+            ctx.fillStyle = gradient;
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            const now = Date.now();
+
+            ctx.shadowColor = 'rgba(255, 255, 255, 0.2)';
+            ctx.shadowBlur = 5;
+            ctx.shadowOffsetX = 2;
+            ctx.shadowOffsetY = 2;
+
+            // Draw normal blocks
+            for (let r = 0; r < rows; r++) {
+                for (let c = 0; c < cols; c++) {
+                    const val = grid[r][c];
+                    if (val !== -1) {
+                        let skip = destroyingBlocks.some(b => b.row === r && b.col === c) ||
+                                   fallingBlocks.some(b => b.row === r && b.col === c) ||
+                                   shiftingBlocks.some(b => b.row === r && b.col === c);
+                        if (skip) continue;
+
+                        const colorIndex = Math.abs(val) - 1;
+                        ctx.fillStyle = COLORS[colorIndex % COLORS.length];
+                        let x = c * blockSize + (direction === 'horizontal' ? offset : 0);
+                        let y = r * blockSize + (direction === 'vertical' ? offset : 0);
+                        drawRoundedRect(x, y, blockSize, blockSize, 4);
+                        ctx.fill();
+                        ctx.strokeStyle = '#fff';
+                        ctx.lineWidth = 2;
+                        ctx.stroke();
+
+                        if (val < 0) {
+                            ctx.fillStyle = '#fff';
+                            ctx.beginPath();
+                            ctx.arc(x + blockSize / 2, y + blockSize / 2, blockSize / 4, 0, 2 * Math.PI);
+                            ctx.fill();
+                        }
+                    }
+                }
+            }
+
+            // Draw destroying blocks
+            for (let b of destroyingBlocks) {
+                const progress = Math.min((now - b.start) / 300, 1);
+                const alpha = 1 - progress;
+                const scale = 1 - progress * 0.5;
+                const colorIndex = Math.abs(b.val) - 1;
+                let x = b.col * blockSize + (direction === 'horizontal' ? offset : 0) + (blockSize / 2) * (1 - scale);
+                let y = b.row * blockSize + (direction === 'vertical' ? offset : 0) + (blockSize / 2) * (1 - scale);
+                ctx.save();
+                ctx.globalAlpha = alpha;
+                ctx.fillStyle = COLORS[colorIndex % COLORS.length];
+                drawRoundedRect(x, y, blockSize * scale, blockSize * scale, 4);
+                ctx.fill();
+                ctx.strokeStyle = '#fff';
+                ctx.lineWidth = 2;
+                ctx.stroke();
+                if (b.val < 0) {
+                    ctx.fillStyle = '#fff';
+                    ctx.beginPath();
+                    ctx.arc(x + (blockSize * scale) / 2, y + (blockSize * scale) / 2, (blockSize * scale) / 4, 0, 2 * Math.PI);
+                    ctx.fill();
+                }
+                ctx.restore();
+            }
+
+            // Draw falling blocks
+            for (let b of fallingBlocks) {
+                const progress = Math.min((now - b.startTime) / 300, 1);
+                const colorIndex = Math.abs(b.val) - 1;
+                let x, y;
+                if (direction === 'horizontal') {
+                    const currentRow = b.startRow + (b.targetRow - b.startRow) * progress;
+                    x = b.col * blockSize + offset;
+                    y = currentRow * blockSize;
+                } else {
+                    const currentCol = b.startCol + (b.targetCol - b.startCol) * progress;
+                    x = currentCol * blockSize;
+                    y = b.row * blockSize + offset;
+                }
+                ctx.fillStyle = COLORS[colorIndex % COLORS.length];
+                drawRoundedRect(x, y, blockSize, blockSize, 4);
+                ctx.fill();
+                ctx.strokeStyle = '#fff';
+                ctx.lineWidth = 2;
+                ctx.stroke();
+                if (b.val < 0) {
+                    ctx.fillStyle = '#fff';
+                    ctx.beginPath();
+                    ctx.arc(x + blockSize / 2, y + blockSize / 2, blockSize / 4, 0, 2 * Math.PI);
+                    ctx.fill();
+                }
+            }
+
+            // Draw shifting blocks
+            for (let b of shiftingBlocks) {
+                const progress = Math.min((now - b.startTime) / 300, 1);
+                const colorIndex = Math.abs(b.val) - 1;
+                let x, y;
+                if (direction === 'horizontal') {
+                    const currentCol = b.startCol + (b.targetCol - b.startCol) * progress;
+                    x = currentCol * blockSize + offset;
+                    y = b.row * blockSize;
+                } else {
+                    const currentRow = b.startRow + (b.targetRow - b.startRow) * progress;
+                    x = b.col * blockSize;
+                    y = currentRow * blockSize + offset;
+                }
+                ctx.fillStyle = COLORS[colorIndex % COLORS.length];
+                drawRoundedRect(x, y, blockSize, blockSize, 4);
+                ctx.fill();
+                ctx.strokeStyle = '#fff';
+                ctx.lineWidth = 2;
+                ctx.stroke();
+                if (b.val < 0) {
+                    ctx.fillStyle = '#fff';
+                    ctx.beginPath();
+                    ctx.arc(x + blockSize / 2, y + blockSize / 2, blockSize / 4, 0, 2 * Math.PI);
+                    ctx.fill();
+                }
+            }
+
+            ctx.shadowBlur = 0;
+        }
+
+        function update() {
+            if (!gameRunning || paused) return;
+
+            const now = Date.now();
+
+            destroyingBlocks = destroyingBlocks.filter(b => (now - b.start) / 300 < 1);
+
+            fallingBlocks = fallingBlocks.filter(b => (now - b.startTime) / 300 < 1);
+
+            shiftingBlocks = shiftingBlocks.filter(b => (now - b.startTime) / 300 < 1);
+
+            if (phase === 'normal') {
+                offset += speed;
+                if (offset >= blockSize) {
+                    let hasBlockAtEnd = direction === 'horizontal' ? hasBlockInRightColumn() : hasBlockInBottomRow();
+                    if (hasBlockAtEnd) {
+                        gameOver();
+                        return;
+                    } else {
+                        offset = 0;
+                        if (direction === 'horizontal') {
+                            shiftRight();
+                            addNewLeftColumn();
+                        } else {
+                            shiftDown();
+                            addNewTopRow();
+                        }
+                        shiftCount++;
+                        if (shiftCount % 10 === 0) {
+                            numColors = Math.min(7, numColors + 1);
+                            speed += 0.2;
+                        }
+                    }
+                }
+            } else if (phase === 'destroy') {
+                if (destroyingBlocks.length === 0) {
+                    fallingBlocks = getFallingBlocks();
+                    phase = 'fall';
+                }
+            } else if (phase === 'fall') {
+                if (fallingBlocks.length === 0) {
+                    applyGravity();
+                    shiftingBlocks = getShiftingBlocks();
+                    phase = 'shift';
+                }
+            } else if (phase === 'shift') {
+                if (shiftingBlocks.length === 0) {
+                    shiftEnd();
+                    phase = 'normal';
+                }
+            }
+
+            drawGrid();
+            animationLoop = requestAnimationFrame(update);
+        }
+
+        function hasBlockInRightColumn() {
+            for (let r = 0; r < rows; r++) {
+                if (grid[r][cols - 1] !== -1) return true;
+            }
+            return false;
+        }
+
+        function hasBlockInBottomRow() {
+            for (let c = 0; c < cols; c++) {
+                if (grid[rows - 1][c] !== -1) return true;
+            }
+            return false;
+        }
+
+        function shiftRight() {
+            for (let r = 0; r < rows; r++) {
+                for (let c = cols - 1; c >= 1; c--) {
+                    grid[r][c] = grid[r][c - 1];
+                }
+                grid[r][0] = -1;
+            }
+        }
+
+        function shiftDown() {
+            for (let c = 0; c < cols; c++) {
+                for (let r = rows - 1; r >= 1; r--) {
+                    grid[r][c] = grid[r - 1][c];
+                }
+                grid[0][c] = -1;
+            }
+        }
+
+        function addNewLeftColumn() {
+            for (let r = 0; r < rows; r++) {
+                let color = 1 + Math.floor(Math.random() * numColors);
+                grid[r][0] = Math.random() < bombChance ? -color : color;
+            }
+        }
+
+        function addNewTopRow() {
+            for (let c = 0; c < cols; c++) {
+                let color = 1 + Math.floor(Math.random() * numColors);
+                grid[0][c] = Math.random() < bombChance ? -color : color;
+            }
+        }
+
+        function getGroup(row, col) {
+            const val = grid[row][col];
+            if (val === -1) return [];
+            const color = Math.abs(val);
+            const group = [];
+            const visited = Array.from({length: rows}, () => Array(cols).fill(false));
+
+            function dfs(r, c) {
+                if (r < 0 || r >= rows || c < 0 || c >= cols || visited[r][c] || Math.abs(grid[r][c]) !== color) return;
+                visited[r][c] = true;
+                group.push({row: r, col: c, val: grid[r][c]});
+                dfs(r - 1, c);
+                dfs(r + 1, c);
+                dfs(r, c - 1);
+                dfs(r, c + 1);
+            }
+
+            dfs(row, col);
+            return group;
+        }
+
+        function startDestroy(positions, scoreAdd) {
+            score += scoreAdd;
+            updateScore();
+            positions.forEach(p => {
+                grid[p.row][p.col] = -1;
+            });
+            destroyingBlocks = positions.map(p => ({row: p.row, col: p.col, val: p.val, start: Date.now()}));
+        }
+
+        function clearAllColor(color) {
+            let positions = [];
+            let count = 0;
+            for (let r = 0; r < rows; r++) {
+                for (let c = 0; c < cols; c++) {
+                    if (Math.abs(grid[r][c]) === color) {
+                        positions.push({row: r, col: c, val: grid[r][c]});
+                        count++;
+                    }
+                }
+            }
+            return {positions, count};
+        }
+
+        function applyGravity() {
+            if (direction === 'horizontal') {
+                applyVerticalGravity();
+            } else {
+                applyHorizontalGravity();
+            }
+        }
+
+        function applyVerticalGravity() {
+            for (let c = 0; c < cols; c++) {
+                let writeRow = rows - 1;
+                for (let readRow = rows - 1; readRow >= 0; readRow--) {
+                    if (grid[readRow][c] !== -1) {
+                        grid[writeRow][c] = grid[readRow][c];
+                        if (writeRow !== readRow) {
+                            grid[readRow][c] = -1;
+                        }
+                        writeRow--;
+                    }
+                }
+            }
+        }
+
+        function applyHorizontalGravity() {
+            for (let r = 0; r < rows; r++) {
+                let writeCol = cols - 1;
+                for (let readCol = cols - 1; readCol >= 0; readCol--) {
+                    if (grid[r][readCol] !== -1) {
+                        grid[r][writeCol] = grid[r][readCol];
+                        if (writeCol !== readCol) {
+                            grid[r][readCol] = -1;
+                        }
+                        writeCol--;
+                    }
+                }
+            }
+        }
+
+        function isColumnEmpty(col) {
+            for (let r = 0; r < rows; r++) {
+                if (grid[r][col] !== -1) return false;
+            }
+            return true;
+        }
+
+        function isRowEmpty(row) {
+            for (let c = 0; c < cols; c++) {
+                if (grid[row][c] !== -1) return false;
+            }
+            return true;
+        }
+
+        function getFallingBlocks() {
+            let falling = [];
+            if (direction === 'horizontal') {
+                for (let c = 0; c < cols; c++) {
+                    let column = [];
+                    for (let r = 0; r < rows; r++) {
+                        if (grid[r][c] !== -1) {
+                            column.push({row: r, val: grid[r][c]});
+                        }
+                    }
+                    let targetR = rows - 1;
+                    for (let i = column.length - 1; i >= 0; i--) {
+                        const origR = column[i].row;
+                        const val = column[i].val;
+                        if (targetR > origR) {
+                            falling.push({row: origR, col: c, startRow: origR, targetRow: targetR, val, startTime: Date.now()});
+                        }
+                        targetR--;
+                    }
+                }
+            } else {
+                for (let r = 0; r < rows; r++) {
+                    let rowBlocks = [];
+                    for (let c = 0; c < cols; c++) {
+                        if (grid[r][c] !== -1) {
+                            rowBlocks.push({col: c, val: grid[r][c]});
+                        }
+                    }
+                    let targetC = cols - 1;
+                    for (let i = rowBlocks.length - 1; i >= 0; i--) {
+                        const origC = rowBlocks[i].col;
+                        const val = rowBlocks[i].val;
+                        if (origC < targetC) {
+                            falling.push({row: r, col: origC, startCol: origC, targetCol: targetC, val, startTime: Date.now()});
+                        }
+                        targetC--;
+                    }
+                }
+            }
+            return falling;
+        }
+
+        function getShiftingBlocks() {
+            let shifting = [];
+            if (direction === 'horizontal') {
+                let writeCol = 0;
+                for (let readCol = 0; readCol < cols; readCol++) {
+                    if (!isColumnEmpty(readCol)) {
+                        if (writeCol !== readCol) {
+                            for (let r = 0; r < rows; r++) {
+                                const val = grid[r][readCol];
+                                if (val !== -1) {
+                                    shifting.push({row: r, col: readCol, startCol: readCol, targetCol: writeCol, val, startTime: Date.now()});
+                                }
+                            }
+                        }
+                        writeCol++;
+                    }
+                }
+            } else {
+                let writeRow = 0;
+                for (let readRow = 0; readRow < rows; readRow++) {
+                    if (!isRowEmpty(readRow)) {
+                        if (writeRow !== readRow) {
+                            for (let c = 0; c < cols; c++) {
+                                const val = grid[readRow][c];
+                                if (val !== -1) {
+                                    shifting.push({row: readRow, col: c, startRow: readRow, targetRow: writeRow, val, startTime: Date.now()});
+                                }
+                            }
+                        }
+                        writeRow++;
+                    }
+                }
+            }
+            return shifting;
+        }
+
+        function shiftEnd() {
+            if (direction === 'horizontal') {
+                let writeCol = 0;
+                for (let readCol = 0; readCol < cols; readCol++) {
+                    if (!isColumnEmpty(readCol)) {
+                        if (writeCol !== readCol) {
+                            for (let r = 0; r < rows; r++) {
+                                grid[r][writeCol] = grid[r][readCol];
+                                grid[r][readCol] = -1;
+                            }
+                        }
+                        writeCol++;
+                    }
+                }
+                for (let c = writeCol; c < cols; c++) {
+                    for (let r = 0; r < rows; r++) {
+                        grid[r][c] = -1;
+                    }
+                }
+            } else {
+                let writeRow = 0;
+                for (let readRow = 0; readRow < rows; readRow++) {
+                    if (!isRowEmpty(readRow)) {
+                        if (writeRow !== readRow) {
+                            for (let c = 0; c < cols; c++) {
+                                grid[writeRow][c] = grid[readRow][c];
+                                grid[readRow][c] = -1;
+                            }
+                        }
+                        writeRow++;
+                    }
+                }
+                for (let r = writeRow; r < rows; r++) {
+                    for (let c = 0; c < cols; c++) {
+                        grid[r][c] = -1;
+                    }
+                }
+            }
+        }
+
+        function gameOver() {
+            gameRunning = false;
+            alert(`Game Over! Final Score: ${score}`);
+            initGame();
+        }
+
+        canvas.addEventListener('click', (e) => {
+            if (!gameRunning || paused || phase !== 'normal') return;
+            const rect = canvas.getBoundingClientRect();
+            const mouseX = e.clientX - rect.left;
+            const mouseY = e.clientY - rect.top;
+            let col, row;
+            if (direction === 'horizontal') {
+                col = Math.floor((mouseX - offset) / blockSize);
+                row = Math.floor(mouseY / blockSize);
+            } else {
+                col = Math.floor(mouseX / blockSize);
+                row = Math.floor((mouseY - offset) / blockSize);
+            }
+            if (row >= 0 && row < rows && col >= 0 && col < cols) {
+                const val = grid[row][col];
+                if (val !== -1) {
+                    const color = Math.abs(val);
+                    let positions, count, scoreAdd;
+                    if (val < 0) {
+                        ({positions, count} = clearAllColor(color));
+                        scoreAdd = Math.floor((count - 2) ** 2 / 4);
+                    } else {
+                        const group = getGroup(row, col);
+                        if (group.length >= 2) {
+                            positions = group;
+                            scoreAdd = (group.length - 2) ** 2;
+                        } else {
+                            return;
+                        }
+                    }
+                    startDestroy(positions, scoreAdd);
+                    phase = 'destroy';
+                    drawGrid();
+                }
+            }
+        });
+
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'n' || e.key === 'N') {
+                initGame();
+            } else if (e.key === ' ') {
+                togglePause();
+            }
+        });
+
+        window.addEventListener('resize', () => {
+            if (gameRunning) {
+                determineOrientationAndSize();
+                drawGrid();
+            }
+        });
+
+        initGame();
+    </script>
+</body>
+</html>
